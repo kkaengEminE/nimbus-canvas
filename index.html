@@ -1,0 +1,912 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>한가한 신 · 2D 힐링 구름 시뮬레이터 (nimbus-canvas)</title>
+<style>
+  /* ───────────────────────────────────────────────────────────────
+     UI LAYER STYLING (z-index 위)  ·  최상단 레이어
+     화면 레이어 순서:  지상 배경 → 그림자 → 비 → 구름  (캔버스)  →  UI (DOM)
+     ─────────────────────────────────────────────────────────────── */
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #06070d; }
+  #scene { position: fixed; inset: 0; display: block; cursor: none; touch-action: none; }
+
+  /* 미니멀 환경 제어 슬라이더 패널 (화면 구석) */
+  #ui {
+    position: fixed; left: 18px; bottom: 18px; z-index: 10;
+    width: 226px; padding: 14px 16px 16px;
+    font: 12px/1.4 -apple-system, "Pretendard", "Apple SD Gothic Neo", system-ui, sans-serif;
+    color: #e8ecf5; user-select: none;
+    background: rgba(18, 22, 34, 0.42);
+    border: 1px solid rgba(255,255,255,0.10);
+    border-radius: 14px;
+    backdrop-filter: blur(9px); -webkit-backdrop-filter: blur(9px);
+    box-shadow: 0 8px 30px rgba(0,0,0,0.35);
+    transition: opacity .4s ease;
+  }
+  #ui:hover { opacity: 1; }
+  #ui.dim { opacity: 0.38; }
+  #ui h1 { font-size: 13px; font-weight: 600; letter-spacing: .3px; margin-bottom: 2px; }
+  #ui .mode { font-size: 10.5px; opacity: .72; margin-bottom: 11px; }
+  #ui .mode b { color: #8fd0ff; font-weight: 600; }
+  #ui .row { margin: 9px 0; }
+  #ui .row label { display: flex; justify-content: space-between; font-size: 10.5px; opacity: .82; margin-bottom: 3px; }
+  #ui input[type=range] {
+    -webkit-appearance: none; appearance: none; width: 100%; height: 4px;
+    background: rgba(255,255,255,0.16); border-radius: 4px; outline: none;
+  }
+  #ui input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none; width: 13px; height: 13px; border-radius: 50%;
+    background: #cfe4ff; box-shadow: 0 0 6px rgba(140,200,255,.8); cursor: grab;
+  }
+  #ui input[type=range]::-moz-range-thumb {
+    width: 13px; height: 13px; border: none; border-radius: 50%;
+    background: #cfe4ff; box-shadow: 0 0 6px rgba(140,200,255,.8); cursor: grab;
+  }
+  #ui .foot { display: flex; align-items: center; justify-content: space-between; margin-top: 13px; }
+  #ui button {
+    font: inherit; font-size: 11px; color: #e8ecf5; cursor: pointer;
+    background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.14);
+    border-radius: 8px; padding: 5px 10px;
+  }
+  #ui button:hover { background: rgba(255,255,255,0.16); }
+  #hint {
+    position: fixed; top: 18px; left: 50%; transform: translateX(-50%); z-index: 10;
+    font: 12.5px/1 -apple-system, system-ui, sans-serif; color: rgba(255,255,255,.62);
+    letter-spacing: .4px; pointer-events: none; transition: opacity 1.2s ease; text-shadow: 0 1px 6px rgba(0,0,0,.5);
+  }
+  #hint.gone { opacity: 0; }
+  #fps {
+    position: fixed; right: 12px; top: 10px; z-index: 10;
+    font: 11px ui-monospace, Menlo, monospace; color: rgba(255,255,255,.5); pointer-events: none; display: none;
+  }
+</style>
+</head>
+<body>
+  <canvas id="scene"></canvas>
+
+  <!-- UI LAYER : 환경 제어 슬라이더. 만지면 Manual Mode, 놓고 가만히 두면 Auto Mode 로 복귀 -->
+  <div id="ui">
+    <h1>한가한 신 ☁</h1>
+    <div class="mode">상태: <b id="modeText">AUTO · 자연 순환</b></div>
+    <div class="row">
+      <label><span>🧭 바람 방향</span><span id="windDirVal">–</span></label>
+      <input type="range" id="windDir" min="0" max="360" step="1" value="90" />
+    </div>
+    <div class="row">
+      <label><span>💨 바람 세기</span><span id="windStrVal">–</span></label>
+      <input type="range" id="windStr" min="0" max="100" step="1" value="35" />
+    </div>
+    <div class="row">
+      <label><span>🌗 시간 (낮/밤)</span><span id="timeVal">–</span></label>
+      <input type="range" id="timeSld" min="0" max="100" step="0.5" value="35" />
+    </div>
+    <div class="foot">
+      <button id="soundBtn">🔇 소리 켜기</button>
+      <button id="autoBtn" title="즉시 자연 순환으로">↺ 방치</button>
+    </div>
+  </div>
+
+  <div id="hint">마우스를 드래그해 구름을 그려보세요 · 산맥에 닿으면 비가 내립니다</div>
+  <div id="fps">–</div>
+
+<script>
+"use strict";
+/* ══════════════════════════════════════════════════════════════════════════
+   2D 힐링 구름 그림 시뮬레이터 — nimbus-canvas
+   순수 Canvas 2D · 외부 에셋 0 · 단일 파일 · 절차적(Procedural) 드로잉
+
+   확정된 설계 결정(decisions):
+     1) 렌더링 = 순수 Canvas 2D API (의존성 0, 완전 오프라인)
+     2) 사운드 = Web Audio 절차적 합성 (빗소리/바람, 파일 없음, 첫 클릭 후 활성)
+     3) 지상 반응 범위 = 핵심 세트 (모래·양동이·풀/숲·농장 작물이 비에 반응,
+        바다·사람·어부는 앰비언트 장식)
+
+   레이어 z-순서(엄격):  지상 배경 → 구름 그림자 → 비 → 구름  →  UI(DOM)
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* ══════════════ ① CONSTANTS — 모든 임계치/환경 변수 (최상단 분리) ══════════════ */
+
+// ── 구름 입자 ──────────────────────────────────────────────
+const MAX_CLOUD_PARTICLES   = 600;   // 활성 구름 입자 총량 상한 (FIFO). ※ 테스트 시 100 으로.
+const PUFF_SPAWN_SPACING    = 13;    // 드래그 궤적 위 입자 간 최소 간격(px)
+const PUFF_BASE_RADIUS      = 34;    // 구름 입자 기본 반경(px)
+const PUFF_FADE_IN_RATE     = 3.2;   // 생성 시 불투명도가 차오르는 속도(/s)
+const PUFF_BASE_OPACITY     = 0.52;  // 입자 1개 최대 불투명도(겹쳐서 밀도 형성)
+const FADE_RATE             = 0.9;   // 소멸(dying) 입자의 기본 페이드아웃 속도(/s)
+const FAST_DRAG_FADE_MULT   = 4.0;   // [엣지] 초고속 드래그 시 페이드 가속 배율
+const FAST_DRAG_REF_SPEED   = 2600;  // 이 속도(px/s)에서 가속 계수 1.0 포화
+const FAST_DRAG_DECAY       = 2.2;   // 드래그 가속 계수 감쇠(/s)
+const OFFSCREEN_MARGIN      = 90;    // [엣지] 화면 밖 이만큼 벗어나면 구름 객체 완전 제거(Destroy)
+
+// ── 바람 ──────────────────────────────────────────────────
+const WIND_MAX              = 72;    // 최대 바람 세기(px/s)
+const WIND_MIN_AUTO         = 9;     // 자연 모드 최소 세기
+const WIND_EASE             = 1.6;   // 목표 바람으로 부드럽게 수렴(/s)
+
+// ── 오로그래픽 강우(지형성 비) ─────────────────────────────
+const MOUNTAIN_STALL_FACTOR = 0.06;  // 산맥 진입 시 속력 스케일러(≈정지)
+const MOISTURE_GAIN_PER_SEC = 0.40;  // 산맥에서 초당 수분 축적량
+const MOISTURE_EVAP_PER_SEC = 0.10;  // 산맥 밖에서 수분 자연 증발
+const RAIN_THRESHOLD        = 0.52;  // 이 수분 이상이면 먹구름→강우 시작
+const RAIN_STOP_THRESHOLD   = 0.30;  // 이 아래로 떨어지면 강우 중단(히스테리시스)
+const RAIN_DURATION_SEC     = 9.0;   // [엣지] 강우 지속 한계 → 이후 수분고갈·소멸(영구갇힘 방지)
+const RAIN_EMIT_RATE        = 34;    // 강우 구름 1개당 초당 빗방울 생성수
+const RAIN_FALL_SPEED       = 430;   // 빗방울 낙하 속도(px/s)
+const RAIN_FALL_LEN         = 46;    // 빗방울 시각적 낙하 길이(px)
+const RAIN_MAX_PARTICLES    = 1400;  // 빗방울 안전 상한
+const RAIN_DEPOSIT          = 0.85;  // 강우가 지면 격자에 적시는 초당 수분량
+
+// ── 밀도 강우(손으로 한곳에 쌓으면 스스로 비구름) + 시각 뭉침 ──
+const DENSITY_CELL          = 40;    // 구름 밀도 측정 격자 셀 크기(px)
+const DENSITY_RAIN_MIN      = 16;    // 주변(3x3) 입자 수가 이 이상이면 수분 축적 시작
+const DENSITY_MOISTURE_GAIN = 0.34;  // 밀집 구름이 초당 얻는 수분량(/s)
+const HEAVY_SLOWDOWN        = 0.55;  // 젖어 무거운 구름일수록 느려짐(제자리 강우)
+
+// ── 차등 건조 / 지면 ───────────────────────────────────────
+const CELL                  = 22;    // 지면 수분 격자 셀 크기(px)
+const SAND_DRY_RATE         = 0.28;  // 모래: 빠르게 마름(/s)
+const GRASS_DRY_RATE        = 0.050; // 풀/숲: 중간 속도(/s)
+const WET_MAX_ALPHA_SAND    = 0.55;  // 젖은 모래 어둠 강도
+const WET_MAX_ALPHA_GRASS   = 0.45;  // 젖은 풀 진한 정도
+const BUCKET_FILL_RATE      = 0.55;  // 양동이가 비를 받아 차오르는 속도(/s)
+const BUCKET_EVAP_REAL_SEC  = 45;    // 양동이가 가득→0 까지 증발 시간(실제초) ≈ 게임 1.5시간
+const CROP_GROW_RATE        = 0.10;  // 작물 성장 속도(젖었을 때, /s)
+const CROP_DECAY_RATE       = 0.012; // 작물 마름 속도(건조 시, /s)
+const CROP_WET_TRIGGER      = 0.22;  // 이 수분 이상이면 작물 성장
+const BUCKET_CATCH_R        = 95;    // 양동이가 비를 받는 반경(px)
+
+// ── 시간/태양(낮·밤) ───────────────────────────────────────
+const DAY_LENGTH_SEC        = 140;   // 하루(낮+밤) 한 바퀴 실제 시간(s)
+const SHADOW_BASE_LEN       = 26;    // 구름 그림자 기본 오프셋 길이(px)
+const SHADOW_MAX_ALPHA      = 0.30;  // 그림자 최대 농도(정오)
+
+// ── 상호작용/모드 ─────────────────────────────────────────
+// Manual 모드는 sticky: 슬라이더를 건드리면 '↺ 방치' 버튼을 누르기 전까지 유지된다.
+
+// ── 디버그 ────────────────────────────────────────────────
+let   SHOW_FPS = false;              // 콘솔: __nimbus.toggleFps()
+
+// 지면 타입 식별자
+const T_GRASS = 0, T_SAND = 1, T_SEA = 2, T_MOUNTAIN = 3;
+
+/* ══════════════ ② 유틸 ══════════════ */
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const lerp  = (a, b, t) => a + (b - a) * t;
+const TAU   = Math.PI * 2;
+function lerpRGB(c1, c2, t){ return [lerp(c1[0],c2[0],t), lerp(c1[1],c2[1],t), lerp(c1[2],c2[2],t)]; }
+function rgba(c, a){ return `rgba(${c[0]|0},${c[1]|0},${c[2]|0},${a})`; }
+// 각도 최단 보간(바람 방향 회전 튐 방지)
+function easeAngle(cur, target, k){
+  let d = ((target - cur + Math.PI) % TAU + TAU) % TAU - Math.PI;
+  return cur + d * k;
+}
+
+/* ══════════════ ③ 캔버스 / 전역 상태 ══════════════ */
+const canvas = document.getElementById('scene');
+const ctx = canvas.getContext('2d');
+let W = 0, H = 0, DPR = 1;
+
+// 시뮬레이션 상태
+const world = {
+  t: 0.35,                     // 0..1 하루 위상 (0=한밤, 0.5=정오)
+  tw: 0,                       // 바람 자연요동 위상
+  wind: { angle: Math.PI/2, strength: 26 }, // 현재 바람 (rad, px/s)
+  manualWind: false, manualTime: false,
+  lastWindInput: -1e9, lastTimeInput: -1e9,
+};
+let clouds = [];               // FIFO 큐: 오래된 입자가 앞(index 0)
+let rain = [];                 // 빗방울 입자
+let fastDragFactor = 0;        // 드래그 속도 기반 페이드 가속 계수
+
+// 지면 격자 (수분/타입)
+let GCOLS = 0, GROWS = 0;
+let typeGrid = null;           // Uint8Array
+let wetGrid = null;            // Float32Array (0..1)
+// 구름 밀도 격자 (밀도 강우 + 시각 뭉침용)
+let DGCOLS = 0, DGROWS = 0;
+let densGrid = null;           // Int16Array, 셀당 입자 수
+let wetCanvas = null, wetCtx = null, wetImg = null;
+
+// 정적 지형 캐시 + 동적 오브젝트
+let terrainCanvas = null, terrainCtx = null;
+let layout = null;             // 좌표 묶음 (산/바다/모래/양동이/농장/숲/마을)
+let people = [], fisherman = null, crops = { growth: 0 }, bucket = { level: 0 };
+
+// 스프라이트 (구름/그림자) — 1회 생성 후 재사용 (성능)
+let spriteLight = null, spriteDark = null, spriteShadow = null;
+
+// 포인터(브러시) 상태
+const pointer = { x: -1, y: -1, down: false, lastX: 0, lastY: 0, lastT: 0, inside: false };
+
+/* ══════════════ ④ 지형(버드아이 뷰) 기하 정의 ══════════════ */
+// 화면 상단 = 산맥, 그 아래 = 구릉지(마을·농장·숲·모래분지), 하단 = 바다
+function mountainProfile(x){
+  return H*0.10 + Math.sin(x*0.0100)*H*0.050 + Math.sin(x*0.0270+1.5)*H*0.026 + H*0.050;
+}
+function seaTop(x){ return H*0.82 + Math.sin(x*0.0090)*H*0.025; }
+function isMountain(x, y){ return y < mountainProfile(x); }
+function inSandPatch(x, y){
+  const cx = W*0.40, cy = H*0.355, rx = W*0.085, ry = H*0.052;
+  const dx=(x-cx)/rx, dy=(y-cy)/ry; return dx*dx+dy*dy < 1;
+}
+function inBeach(x, y){ const s = seaTop(x); return y < s && y > s - H*0.035; }
+function terrainTypeAt(x, y){
+  if (isMountain(x,y)) return T_MOUNTAIN;
+  if (y > seaTop(x))   return T_SEA;
+  if (inSandPatch(x,y) || inBeach(x,y)) return T_SAND;
+  return T_GRASS;
+}
+
+/* ══════════════ ⑤ 스프라이트 생성 ══════════════ */
+function makeRadialSprite(size, inner){
+  const c = document.createElement('canvas'); c.width = c.height = size;
+  const x = c.getContext('2d');
+  const g = x.createRadialGradient(size/2,size/2,0, size/2,size/2,size/2);
+  g.addColorStop(0,   inner);
+  g.addColorStop(0.55, inner.replace(/[\d.]+\)$/, '0.55)'));
+  g.addColorStop(1,   inner.replace(/[\d.]+\)$/, '0)'));
+  x.fillStyle = g; x.fillRect(0,0,size,size);
+  return c;
+}
+function buildSprites(){
+  spriteLight  = makeRadialSprite(128, 'rgba(255,255,255,1)');
+  spriteDark   = makeRadialSprite(128, 'rgba(74,80,104,1)');   // 먹구름 색
+  spriteShadow = makeRadialSprite(128, 'rgba(0,0,0,1)');
+}
+
+/* ══════════════ ⑥ 지형 베이크 + 격자 구축 ══════════════ */
+function buildTerrain(){
+  // 격자
+  GCOLS = Math.ceil(W / CELL); GROWS = Math.ceil(H / CELL);
+  const n = GCOLS*GROWS;
+  const oldType = typeGrid, oldWet = wetGrid, oldC = GCOLS; // (리사이즈 시 수분은 초기화)
+  typeGrid = new Uint8Array(n); wetGrid = new Float32Array(n);
+  // 구름 밀도 격자
+  DGCOLS = Math.ceil(W / DENSITY_CELL); DGROWS = Math.ceil(H / DENSITY_CELL);
+  densGrid = new Int16Array(DGCOLS * DGROWS);
+  for (let j=0;j<GROWS;j++) for (let i=0;i<GCOLS;i++){
+    typeGrid[j*GCOLS+i] = terrainTypeAt((i+0.5)*CELL, (j+0.5)*CELL);
+  }
+  wetCanvas = document.createElement('canvas'); wetCanvas.width = GCOLS; wetCanvas.height = GROWS;
+  wetCtx = wetCanvas.getContext('2d'); wetImg = wetCtx.createImageData(GCOLS, GROWS);
+
+  // 레이아웃 좌표
+  layout = {
+    bucket:  { x: W*0.50, y: H*0.305, w: 30, h: 26 },
+    farm:    { x: W*0.685, y: H*0.255, w: W*0.165, h: H*0.105 },
+    forest:  { x: W*0.215, y: H*0.330, r: Math.min(W,H)*0.11 },
+    village: { x: W*0.50, y: H*0.305 },
+  };
+  bucket.pos = layout.bucket;
+
+  // 정적 지형 베이크
+  terrainCanvas = document.createElement('canvas'); terrainCanvas.width = W; terrainCanvas.height = H;
+  terrainCtx = terrainCanvas.getContext('2d');
+  bakeTerrain(terrainCtx);
+
+  // 앰비언트 오브젝트 (사람/어부) 초기화
+  initAmbient();
+}
+
+function bakeTerrain(x){
+  // 1) 풀(기본 바탕)
+  let g = x.createLinearGradient(0,0,0,H);
+  g.addColorStop(0, '#6f9a52'); g.addColorStop(1, '#5c8a46');
+  x.fillStyle = g; x.fillRect(0,0,W,H);
+
+  // 2) 산맥
+  g = x.createLinearGradient(0,0,0,H*0.30);
+  g.addColorStop(0, '#6b6f86'); g.addColorStop(1, '#565a72');
+  x.fillStyle = g;
+  x.beginPath(); x.moveTo(0,-2);
+  for (let px=0; px<=W; px+=6) x.lineTo(px, mountainProfile(px));
+  x.lineTo(W,-2); x.closePath(); x.fill();
+  // 능선/눈 하이라이트
+  x.lineWidth = 2;
+  for (let k=0;k<3;k++){
+    x.strokeStyle = `rgba(255,255,255,${0.10 - k*0.025})`;
+    x.beginPath();
+    for (let px=0; px<=W; px+=8){ const y = mountainProfile(px) - 8 - k*12; (px===0? x.moveTo(px,y): x.lineTo(px,y)); }
+    x.stroke();
+  }
+  // 산 그림자(아래쪽 결)
+  x.strokeStyle = 'rgba(40,42,58,0.5)'; x.lineWidth = 1.5;
+  x.beginPath(); for (let px=0; px<=W; px+=10){ const y=mountainProfile(px)-2; (px===0?x.moveTo(px,y):x.lineTo(px,y)); } x.stroke();
+
+  // 3) 모래: 구릉 분지(부드러운 타원) + 해변 띠 (typeGrid 와 같은 기하)
+  x.fillStyle = '#d9c08c';
+  x.beginPath(); x.ellipse(W*0.40, H*0.355, W*0.085, H*0.052, 0, 0, TAU); x.fill();
+  x.beginPath();
+  for (let px=0; px<=W; px+=8){ const y=seaTop(px); (px===0? x.moveTo(px,y): x.lineTo(px,y)); }
+  for (let px=W; px>=0; px-=8){ x.lineTo(px, seaTop(px) - H*0.035); }
+  x.closePath(); x.fill();
+
+  // 4) 바다 (하단)
+  g = x.createLinearGradient(0,H*0.8,0,H);
+  g.addColorStop(0, '#2f86a6'); g.addColorStop(1, '#1f5f86');
+  x.fillStyle = g;
+  x.beginPath(); x.moveTo(0,H+2);
+  for (let px=0; px<=W; px+=6) x.lineTo(px, seaTop(px));
+  x.lineTo(W,H+2); x.closePath(); x.fill();
+
+  // 5) 숲 (나무 군집)
+  bakeForest(x, layout.forest);
+
+  // 6) 농장 흙 + 이랑
+  const f = layout.farm;
+  x.fillStyle = '#7a5836'; x.fillRect(f.x, f.y, f.w, f.h);
+  x.strokeStyle = 'rgba(60,42,24,0.6)'; x.lineWidth = 2;
+  for (let ry = f.y+8; ry < f.y+f.h; ry += 12){ x.beginPath(); x.moveTo(f.x+4, ry); x.lineTo(f.x+f.w-4, ry); x.stroke(); }
+
+  // 7) 마을 집 (양동이 둘레)
+  bakeVillage(x, layout.village);
+}
+
+function bakeForest(x, fo){
+  const seed = 1234; let s = seed;
+  const rnd = () => { s = (s*1103515245+12345) & 0x7fffffff; return s / 0x7fffffff; };
+  const count = 46;
+  for (let k=0;k<count;k++){
+    const a = rnd()*TAU, rr = Math.sqrt(rnd())*fo.r;
+    const tx = fo.x + Math.cos(a)*rr*1.15, ty = fo.y + Math.sin(a)*rr*0.8;
+    if (isMountain(tx,ty) || ty>seaTop(tx)) continue;
+    x.fillStyle = 'rgba(20,40,18,0.28)'; x.beginPath(); x.ellipse(tx+3, ty+5, 9, 5, 0, 0, TAU); x.fill();
+    x.fillStyle = '#2f5d2b'; x.beginPath(); x.arc(tx, ty, 8, 0, TAU); x.fill();
+    x.fillStyle = '#3c7536'; x.beginPath(); x.arc(tx-2, ty-2, 5.5, 0, TAU); x.fill();
+  }
+}
+
+function bakeVillage(x, v){
+  const houses = [ [-46,-6], [-30,18], [30,-2], [44,20], [16,-26] ];
+  for (const [dx,dy] of houses){
+    const hx = v.x+dx, hy = v.y+dy;
+    x.fillStyle = 'rgba(0,0,0,0.22)'; x.fillRect(hx-9, hy+8, 22, 5);
+    x.fillStyle = '#cdb89a'; x.fillRect(hx-9, hy-6, 18, 16);   // 벽
+    x.fillStyle = '#9c4b39'; x.beginPath();                     // 지붕
+    x.moveTo(hx-12, hy-6); x.lineTo(hx, hy-16); x.lineTo(hx+12, hy-6); x.closePath(); x.fill();
+  }
+}
+
+function initAmbient(){
+  // 사람들: 풀밭에서 천천히 배회 (직접 간섭 불가, 순수 장식)
+  people = [];
+  for (let i=0;i<7;i++){
+    const p = randomGrassPoint();
+    people.push({ x:p.x, y:p.y, tx:p.x, ty:p.y, spd: 10+Math.random()*8, c: ['#e8d4b0','#d8b89a','#c9a98a'][i%3] });
+  }
+  // 어부: 바다 위 작은 배
+  fisherman = { x: W*0.62, y: H*0.90, phase: Math.random()*TAU, dir: 1 };
+}
+function randomGrassPoint(){
+  for (let i=0;i<40;i++){
+    const x = W*0.10 + Math.random()*W*0.80;
+    const y = H*0.45 + Math.random()*H*0.32;
+    if (terrainTypeAt(x,y)===T_GRASS) return { x, y };
+  }
+  return { x: W*0.5, y: H*0.6 };
+}
+
+/* ══════════════ ⑦ 입력 핸들러 ══════════════
+   포인터는 오직 "구름 생성"만 한다. 지상 오브젝트는 어떤 클릭/드래그에도
+   반응하지 않는다([Unwanted] 직접 간섭 제한). */
+function spawnPuff(x, y){
+  const r = PUFF_BASE_RADIUS * (0.7 + Math.random()*0.6);
+  clouds.push({
+    x: x + (Math.random()-0.5)*8, y: y + (Math.random()-0.5)*8,
+    r, opacity: 0, baseOpacity: PUFF_BASE_OPACITY,
+    moisture: 0, raining: false, rainTime: 0, dying: false, localDensity: 0,
+  });
+}
+function strokeTo(x, y){
+  const dx = x - pointer.lastX, dy = y - pointer.lastY;
+  const dist = Math.hypot(dx, dy);
+  const steps = Math.max(1, Math.floor(dist / PUFF_SPAWN_SPACING));
+  for (let i=1;i<=steps;i++) spawnPuff(pointer.lastX + dx*i/steps, pointer.lastY + dy*i/steps);
+  pointer.lastX = x; pointer.lastY = y;
+}
+function pointerPos(e){
+  const r = canvas.getBoundingClientRect();
+  return { x: e.clientX - r.left, y: e.clientY - r.top };
+}
+canvas.addEventListener('pointerdown', e => {
+  ensureAudio();
+  hideHint();
+  const p = pointerPos(e);
+  pointer.down = true; pointer.x = p.x; pointer.y = p.y;
+  pointer.lastX = p.x; pointer.lastY = p.y; pointer.lastT = performance.now();
+  spawnPuff(p.x, p.y);
+  canvas.setPointerCapture(e.pointerId);
+});
+canvas.addEventListener('pointermove', e => {
+  const p = pointerPos(e);
+  pointer.x = p.x; pointer.y = p.y; pointer.inside = true;
+  if (pointer.down){
+    const now = performance.now();
+    const dt = Math.max(0.001, (now - pointer.lastT)/1000);
+    const speed = Math.hypot(p.x-pointer.lastX, p.y-pointer.lastY) / dt; // px/s
+    // [엣지] 초고속 드래그 → 오래된 구름 페이드 가속 계수 상승
+    fastDragFactor = Math.max(fastDragFactor, clamp(speed / FAST_DRAG_REF_SPEED, 0, 1));
+    pointer.lastT = now;
+    strokeTo(p.x, p.y);
+  }
+});
+const endStroke = e => { pointer.down = false; };
+canvas.addEventListener('pointerup', endStroke);
+canvas.addEventListener('pointercancel', endStroke);
+canvas.addEventListener('pointerleave', () => { pointer.inside = false; });
+
+// ── 슬라이더(수동 개입) ──
+const elWindDir = document.getElementById('windDir');
+const elWindStr = document.getElementById('windStr');
+const elTime    = document.getElementById('timeSld');
+const elModeTxt = document.getElementById('modeText');
+const elWindDirVal = document.getElementById('windDirVal');
+const elWindStrVal = document.getElementById('windStrVal');
+const elTimeVal = document.getElementById('timeVal');
+const elUI = document.getElementById('ui');
+
+function markWind(){ world.manualWind = true; world.lastWindInput = performance.now()/1000; }
+function markTime(){ world.manualTime = true; world.lastTimeInput = performance.now()/1000; }
+elWindDir.addEventListener('input', markWind);
+elWindStr.addEventListener('input', markWind);
+elTime.addEventListener('input', markTime);
+
+document.getElementById('autoBtn').addEventListener('click', () => {
+  // 즉시 자연 순환으로 (Manual 강제 해제)
+  world.manualWind = world.manualTime = false;
+  world.lastWindInput = world.lastTimeInput = -1e9;
+});
+
+/* ══════════════ ⑧ 절차적 오디오 (Web Audio) ══════════════ */
+const audio = { ctx:null, on:false, started:false, rainGain:null, windGain:null, master:null };
+function makeNoiseBuffer(actx, sec){
+  const buf = actx.createBuffer(1, actx.sampleRate*sec, actx.sampleRate);
+  const d = buf.getChannelData(0);
+  for (let i=0;i<d.length;i++) d[i] = Math.random()*2 - 1;
+  return buf;
+}
+function ensureAudio(){
+  if (audio.started) { if (audio.ctx.state === 'suspended') audio.ctx.resume(); return; }
+  const AC = window.AudioContext || window.webkitAudioContext; if (!AC) return;
+  const actx = new AC();
+  const noise = makeNoiseBuffer(actx, 2.5);
+  audio.master = actx.createGain(); audio.master.gain.value = audio.on ? 0.9 : 0; audio.master.connect(actx.destination);
+  // 비: 광대역 노이즈 → 로우패스
+  const rSrc = actx.createBufferSource(); rSrc.buffer = noise; rSrc.loop = true;
+  const rLP = actx.createBiquadFilter(); rLP.type='lowpass'; rLP.frequency.value=6200;
+  audio.rainGain = actx.createGain(); audio.rainGain.gain.value = 0;
+  rSrc.connect(rLP).connect(audio.rainGain).connect(audio.master); rSrc.start();
+  // 바람: 노이즈 → 느린 로우패스
+  const wSrc = actx.createBufferSource(); wSrc.buffer = noise; wSrc.loop = true;
+  const wLP = actx.createBiquadFilter(); wLP.type='lowpass'; wLP.frequency.value=420;
+  audio.windGain = actx.createGain(); audio.windGain.gain.value = 0; audio.windFilter = wLP;
+  wSrc.connect(wLP).connect(audio.windGain).connect(audio.master); wSrc.start();
+  audio.ctx = actx; audio.started = true;
+  if (actx.state === 'suspended') actx.resume();
+}
+document.getElementById('soundBtn').addEventListener('click', function(){
+  ensureAudio();
+  audio.on = !audio.on;
+  this.textContent = audio.on ? '🔊 소리 끄기' : '🔇 소리 켜기';
+  if (audio.master) audio.master.gain.value = audio.on ? 0.9 : 0;
+});
+
+/* ══════════════ ⑨ 시간/조명 팔레트 ══════════════ */
+// 하루 위상 → 지면 위 조명 틴트 {r,g,b,a}
+const SKY_KEYS = [
+  [0.00, [15,22,55],  0.50], [0.22, [255,162,108], 0.16],
+  [0.30, [255,250,235],0.00], [0.70, [255,250,235], 0.00],
+  [0.80, [255,118,80], 0.20], [1.00, [15,22,55],   0.50],
+];
+function dayTint(t){
+  for (let i=0;i<SKY_KEYS.length-1;i++){
+    const [t0,c0,a0]=SKY_KEYS[i], [t1,c1,a1]=SKY_KEYS[i+1];
+    if (t>=t0 && t<=t1){ const k=(t-t0)/(t1-t0); return { c: lerpRGB(c0,c1,k), a: lerp(a0,a1,k) }; }
+  }
+  return { c:[15,22,55], a:0.5 };
+}
+function sunAltitude(t){ return Math.sin(t*TAU - Math.PI/2); } // -1(자정)..1(정오)
+
+/* ══════════════ ⑩ 업데이트 루프 (고정 60Hz) ══════════════ */
+function depositWet(cx, cy, r, amt){
+  const x0 = Math.max(0, Math.floor((cx-r)/CELL)), x1 = Math.min(GCOLS-1, Math.floor((cx+r)/CELL));
+  const y0 = Math.max(0, Math.floor((cy-r)/CELL)), y1 = Math.min(GROWS-1, Math.floor((cy+r)/CELL));
+  const r2 = r*r;
+  for (let j=y0;j<=y1;j++) for (let i=x0;i<=x1;i++){
+    const tp = typeGrid[j*GCOLS+i];
+    if (tp!==T_SAND && tp!==T_GRASS) continue;
+    const ddx=(i+0.5)*CELL-cx, ddy=(j+0.5)*CELL-cy;
+    if (ddx*ddx+ddy*ddy < r2){ const idx=j*GCOLS+i; wetGrid[idx]=Math.min(1, wetGrid[idx]+amt); }
+  }
+}
+
+// 한 점 주변(3x3 셀) 구름 입자 수 = 국소 밀도
+function densityAt(x, y){
+  const gi = Math.floor(x/DENSITY_CELL), gj = Math.floor(y/DENSITY_CELL);
+  let sum = 0;
+  for (let j=gj-1;j<=gj+1;j++){ if (j<0||j>=DGROWS) continue;
+    for (let i=gi-1;i<=gi+1;i++){ if (i<0||i>=DGCOLS) continue; sum += densGrid[j*DGCOLS+i]; } }
+  return sum;
+}
+
+function update(dt, nowSec){
+  // ── 시간 ──
+  if (world.manualTime){
+    world.t = parseFloat(elTime.value)/100;   // sticky: '↺ 방치' 누르기 전까지 유지
+  } else {
+    world.t = (world.t + dt/DAY_LENGTH_SEC) % 1;
+  }
+
+  // ── 바람 (Auto/Manual) ──
+  world.tw += dt;
+  let targetAngle, targetStrength;
+  if (world.manualWind){
+    targetAngle = parseFloat(elWindDir.value) * Math.PI/180;
+    targetStrength = parseFloat(elWindStr.value)/100 * WIND_MAX;   // sticky: '↺ 방치' 누르기 전까지 유지
+  } else {
+    targetAngle = (Math.sin(world.tw*0.13) + Math.sin(world.tw*0.071+1.3)) * Math.PI;
+    targetStrength = WIND_MIN_AUTO + (Math.sin(world.tw*0.05)*0.5+0.5)*(WIND_MAX-WIND_MIN_AUTO);
+  }
+  world.wind.angle = easeAngle(world.wind.angle, targetAngle, clamp(WIND_EASE*dt,0,1));
+  world.wind.strength = lerp(world.wind.strength, targetStrength, clamp(WIND_EASE*dt,0,1));
+  const wvx = Math.cos(world.wind.angle)*world.wind.strength;
+  const wvy = Math.sin(world.wind.angle)*world.wind.strength;
+
+  fastDragFactor *= Math.exp(-FAST_DRAG_DECAY*dt);
+
+  // 구름 밀도 격자 갱신 (밀도 강우 + 입체 음영용)
+  densGrid.fill(0);
+  for (const p of clouds){
+    if (p.dying) continue;
+    const gi=Math.floor(p.x/DENSITY_CELL), gj=Math.floor(p.y/DENSITY_CELL);
+    if (gi>=0&&gi<DGCOLS&&gj>=0&&gj<DGROWS) densGrid[gj*DGCOLS+gi]++;
+  }
+
+  // ── 구름 이동 + 산맥/밀도 강우 ──
+  let rainingCount = 0;
+  for (const p of clouds){
+    if (p.opacity < p.baseOpacity && !p.dying) p.opacity = Math.min(p.baseOpacity, p.opacity + PUFF_FADE_IN_RATE*dt);
+    const onMtn = isMountain(p.x, p.y);
+    const dens = densityAt(p.x, p.y); p.localDensity = dens;
+    // 젖어 무거운 구름(또는 산맥)일수록 느려져 제자리에서 비를 쏟는다
+    let scale = (onMtn ? MOUNTAIN_STALL_FACTOR : 1) * (1 - HEAVY_SLOWDOWN * p.moisture);
+    p.x += wvx*dt*scale; p.y += wvy*dt*scale;
+
+    // 수분 축적: 산맥(오로그래픽) 또는 한곳에 빽빽이 쌓은 밀도(손으로 빚는 비구름)
+    let gain = onMtn ? MOISTURE_GAIN_PER_SEC : 0;
+    if (dens >= DENSITY_RAIN_MIN) gain += DENSITY_MOISTURE_GAIN;
+    if (gain > 0) p.moisture = Math.min(1, p.moisture + gain*dt);
+    else          p.moisture = Math.max(0, p.moisture - MOISTURE_EVAP_PER_SEC*dt);
+
+    if (!p.raining && p.moisture >= RAIN_THRESHOLD) p.raining = true;
+    if (p.raining && p.moisture < RAIN_STOP_THRESHOLD) p.raining = false;
+
+    if (p.raining){
+      rainingCount++;
+      p.rainTime += dt;
+      depositWet(p.x, p.y + p.r*0.6, p.r*1.7, RAIN_DEPOSIT*dt); // 비는 구름 아래 구릉지로 넓게 떨어진다
+      // 양동이가 비를 받음
+      const bx=bucket.pos.x, by=bucket.pos.y;
+      if ((p.x-bx)*(p.x-bx)+(p.y-by)*(p.y-by) < BUCKET_CATCH_R*BUCKET_CATCH_R)
+        bucket.level = Math.min(1, bucket.level + BUCKET_FILL_RATE*dt);
+      // 빗방울 생성
+      if (rain.length < RAIN_MAX_PARTICLES){
+        let n = RAIN_EMIT_RATE*dt; let cnt = Math.floor(n) + (Math.random()<(n%1)?1:0);
+        for (let i=0;i<cnt;i++)
+          rain.push({ x: p.x+(Math.random()-0.5)*p.r*1.6, y: p.y+(Math.random()-0.4)*p.r, life: RAIN_FALL_LEN });
+      }
+      // [엣지] 강우 지속 한계 초과 → 수분 고갈·소멸 (산맥 영구 갇힘 방지)
+      if (p.rainTime > RAIN_DURATION_SEC){ p.dying = true; p.moisture = Math.max(0, p.moisture - dt*0.6); }
+    }
+  }
+
+  // ── FIFO 오버플로우: 살아있는(소멸 중이 아닌) 입자 수를 상한으로 캡.
+  //    소멸 중 입자는 페이드에 ~1초 걸리므로, 살아있는 수만 세지 않으면
+  //    매 프레임 새 입자를 추가 표시(marking)해 전체가 연쇄 소멸함. ⚠
+  let live = 0; for (const p of clouds) if (!p.dying) live++;
+  const overflow = live - MAX_CLOUD_PARTICLES;
+  if (overflow > 0){
+    let marked = 0;
+    for (let i=0; i<clouds.length && marked<overflow; i++){
+      if (!clouds[i].dying){ clouds[i].dying = true; marked++; }   // 가장 오래된(앞쪽) 입자부터
+    }
+  }
+  // 소멸 페이드 (드래그 속도에 비례 가속) + 화면밖 제거
+  const fadeMul = 1 + fastDragFactor*FAST_DRAG_FADE_MULT;
+  const keep = [];
+  for (const p of clouds){
+    if (p.dying) p.opacity -= FADE_RATE*fadeMul*dt;
+    const off = p.x < -OFFSCREEN_MARGIN || p.x > W+OFFSCREEN_MARGIN || p.y < -OFFSCREEN_MARGIN || p.y > H+OFFSCREEN_MARGIN;
+    if (p.opacity > 0.003 && !off) keep.push(p);
+  }
+  clouds = keep;
+
+  // ── 빗방울 낙하 ──
+  const rkeep = [];
+  for (const d of rain){ d.y += RAIN_FALL_SPEED*dt; d.x += wvx*dt*0.3; d.life -= RAIN_FALL_SPEED*dt; if (d.life>0 && d.y<H+10) rkeep.push(d); }
+  rain = rkeep;
+
+  // ── 차등 건조: 지면 격자 ──
+  for (let k=0;k<wetGrid.length;k++){
+    if (wetGrid[k] <= 0) continue;
+    const tp = typeGrid[k];
+    const rate = tp===T_SAND ? SAND_DRY_RATE : tp===T_GRASS ? GRASS_DRY_RATE : 1;
+    wetGrid[k] = Math.max(0, wetGrid[k] - rate*dt);
+  }
+
+  // ── 양동이: 상시 증발 (비올 때는 충전이 더 빠름) ──
+  bucket.level = Math.max(0, bucket.level - (1/BUCKET_EVAP_REAL_SEC)*dt);
+
+  // ── 작물: 농장 평균 수분으로 성장/감퇴 ──
+  const f = layout.farm; let sum=0,cells=0;
+  const fi0=Math.floor(f.x/CELL), fi1=Math.floor((f.x+f.w)/CELL), fj0=Math.floor(f.y/CELL), fj1=Math.floor((f.y+f.h)/CELL);
+  for (let j=fj0;j<=fj1;j++) for (let i=fi0;i<=fi1;i++){ if(i>=0&&i<GCOLS&&j>=0&&j<GROWS){ sum+=wetGrid[j*GCOLS+i]; cells++; } }
+  const farmWet = cells? sum/cells : 0;
+  if (farmWet > CROP_WET_TRIGGER) crops.growth = Math.min(1, crops.growth + CROP_GROW_RATE*dt);
+  else crops.growth = Math.max(0, crops.growth - CROP_DECAY_RATE*dt);
+
+  // ── 앰비언트 ──
+  for (const pe of people){
+    const dx=pe.tx-pe.x, dy=pe.ty-pe.y, dd=Math.hypot(dx,dy);
+    if (dd < 3){ const np=randomGrassPoint(); pe.tx=np.x; pe.ty=np.y; }
+    else { pe.x += dx/dd*pe.spd*dt; pe.y += dy/dd*pe.spd*dt; }
+  }
+  if (fisherman){ fisherman.phase += dt*1.3; fisherman.x += fisherman.dir*6*dt; if (fisherman.x>W*0.78||fisherman.x<W*0.5) fisherman.dir*=-1; }
+
+  // ── 오디오 파라미터 ──
+  if (audio.started){
+    const rTarget = audio.on ? clamp(rainingCount*0.05, 0, 0.5) : 0;
+    const wTarget = audio.on ? clamp(world.wind.strength/WIND_MAX*0.10, 0, 0.10) : 0;
+    audio.rainGain.gain.value += (rTarget - audio.rainGain.gain.value) * clamp(dt*4,0,1);
+    audio.windGain.gain.value += (wTarget - audio.windGain.gain.value) * clamp(dt*4,0,1);
+    if (audio.windFilter) audio.windFilter.frequency.value = 300 + world.wind.strength*4;
+  }
+
+  syncUI(nowSec);
+}
+
+function syncUI(nowSec){
+  // Auto 모드일 때 슬라이더가 현재 자연값을 따라오게(잡았을 때 연속) — 단, 조작 중이면 건드리지 않음
+  if (!world.manualWind){
+    if (document.activeElement !== elWindDir){ let d=((world.wind.angle*180/Math.PI)%360+360)%360; elWindDir.value=d.toFixed(0); }
+    if (document.activeElement !== elWindStr) elWindStr.value=(world.wind.strength/WIND_MAX*100).toFixed(0);
+  }
+  if (!world.manualTime && document.activeElement !== elTime) elTime.value=(world.t*100).toFixed(1);
+  const manual = world.manualWind || world.manualTime;
+  elModeTxt.innerHTML = manual ? 'MANUAL · 신의 개입' : 'AUTO · 자연 순환';
+  elWindDirVal.textContent = `${(((world.wind.angle*180/Math.PI)%360+360)%360).toFixed(0)}°`;
+  elWindStrVal.textContent = `${(world.wind.strength/WIND_MAX*100).toFixed(0)}%`;
+  const hh = ((world.t*24)+6)%24; elTimeVal.textContent = `${hh.toFixed(0).padStart(2,'0')}:00`;
+  elUI.classList.toggle('dim', !manual && !pointer.down);
+}
+
+/* ══════════════ ⑪ 렌더 파이프라인 (레이어별 함수) ══════════════ */
+function render(){
+  ctx.clearRect(0,0,W,H);
+  ctx.imageSmoothingEnabled = true;
+
+  // L1) 지상 배경
+  drawGround();
+  // L1.5) 조명(낮/밤) 틴트
+  drawDayTint();
+  // L2) 구름 그림자
+  drawShadows();
+  // L3) 비
+  drawRain();
+  // L4) 구름
+  drawClouds();
+  // 브러시 커서
+  drawBrush();
+}
+
+function drawGround(){
+  ctx.drawImage(terrainCanvas, 0, 0, W, H);
+
+  // 바다 물결(앰비언트)
+  const t = performance.now()/1000;
+  ctx.strokeStyle = 'rgba(255,255,255,0.13)'; ctx.lineWidth = 2;
+  for (let k=0;k<5;k++){
+    ctx.beginPath();
+    const yy = H*0.85 + k*H*0.028;
+    for (let px=0; px<=W; px+=12){ const y = yy + Math.sin(px*0.03 + t*1.4 + k)*3; (px===0?ctx.moveTo(px,y):ctx.lineTo(px,y)); }
+    ctx.stroke();
+  }
+
+  // 젖음 오버레이 (저해상 격자 → 부드럽게 확대)
+  const d = wetImg.data;
+  for (let k=0;k<wetGrid.length;k++){
+    const w = wetGrid[k]; const o = k*4;
+    if (w<=0){ d[o+3]=0; continue; }
+    if (typeGrid[k]===T_SAND){ d[o]=120; d[o+1]=86; d[o+2]=46; d[o+3]=(w*WET_MAX_ALPHA_SAND*255)|0; }
+    else { d[o]=28; d[o+1]=70; d[o+2]=34; d[o+3]=(w*WET_MAX_ALPHA_GRASS*255)|0; }
+  }
+  wetCtx.putImageData(wetImg, 0, 0);
+  ctx.drawImage(wetCanvas, 0, 0, GCOLS, GROWS, 0, 0, W, H);
+
+  // 작물 (성장 반영)
+  drawCrops();
+  // 양동이 물 (동적)
+  drawBucket();
+  // 사람/어부
+  drawAmbient();
+}
+
+function drawCrops(){
+  const f = layout.farm, g = crops.growth;
+  for (let cy = f.y+12; cy < f.y+f.h-4; cy += 12)
+    for (let cx = f.x+10; cx < f.x+f.w-6; cx += 14){
+      const hgt = 3 + g*13;
+      ctx.strokeStyle = g>0.5? '#4a8a3a' : '#7a8a40'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(cx, cy-hgt); ctx.stroke();
+      if (g>0.35){ ctx.fillStyle = g>0.7? '#e8c84a' : '#6fae4a'; ctx.beginPath(); ctx.arc(cx, cy-hgt, 2+g*1.6, 0, TAU); ctx.fill(); }
+    }
+}
+
+function drawBucket(){
+  const b = bucket.pos;
+  // 통
+  ctx.fillStyle = '#8a6a44'; ctx.beginPath();
+  ctx.moveTo(b.x-b.w/2, b.y-b.h/2); ctx.lineTo(b.x+b.w/2, b.y-b.h/2);
+  ctx.lineTo(b.x+b.w/2-4, b.y+b.h/2); ctx.lineTo(b.x-b.w/2+4, b.y+b.h/2); ctx.closePath(); ctx.fill();
+  // 물
+  if (bucket.level > 0.01){
+    const wl = bucket.level; const topY = b.y+b.h/2 - 4 - wl*(b.h-6);
+    const halfTop = b.w/2 - 4 - (1-wl)*4;
+    ctx.fillStyle = 'rgba(70,150,200,0.92)';
+    ctx.beginPath();
+    ctx.moveTo(b.x-halfTop, topY); ctx.lineTo(b.x+halfTop, topY);
+    ctx.lineTo(b.x+b.w/2-4, b.y+b.h/2-2); ctx.lineTo(b.x-b.w/2+4, b.y+b.h/2-2); ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = 'rgba(200,235,255,0.6)'; ctx.lineWidth=1; ctx.beginPath(); ctx.moveTo(b.x-halfTop,topY); ctx.lineTo(b.x+halfTop,topY); ctx.stroke();
+  }
+  // 테두리
+  ctx.strokeStyle = '#5e4628'; ctx.lineWidth = 2; ctx.beginPath();
+  ctx.moveTo(b.x-b.w/2, b.y-b.h/2); ctx.lineTo(b.x+b.w/2, b.y-b.h/2);
+  ctx.lineTo(b.x+b.w/2-4, b.y+b.h/2); ctx.lineTo(b.x-b.w/2+4, b.y+b.h/2); ctx.closePath(); ctx.stroke();
+}
+
+function drawAmbient(){
+  for (const pe of people){
+    ctx.fillStyle = 'rgba(0,0,0,0.22)'; ctx.beginPath(); ctx.ellipse(pe.x, pe.y+3, 4, 2, 0, 0, TAU); ctx.fill();
+    ctx.fillStyle = pe.c; ctx.beginPath(); ctx.arc(pe.x, pe.y, 3.2, 0, TAU); ctx.fill();
+  }
+  if (fisherman){
+    const fb = fisherman, bob = Math.sin(fb.phase)*2;
+    ctx.fillStyle = '#6b4a2c'; ctx.beginPath();
+    ctx.moveTo(fb.x-12, fb.y+bob); ctx.lineTo(fb.x+12, fb.y+bob);
+    ctx.lineTo(fb.x+7, fb.y+6+bob); ctx.lineTo(fb.x-7, fb.y+6+bob); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#c9a98a'; ctx.beginPath(); ctx.arc(fb.x, fb.y-3+bob, 2.4, 0, TAU); ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.5)'; ctx.lineWidth=1; ctx.beginPath(); ctx.moveTo(fb.x,fb.y-5+bob); ctx.lineTo(fb.x+10,fb.y+2+bob); ctx.stroke();
+  }
+}
+
+function drawDayTint(){
+  const { c, a } = dayTint(world.t);
+  if (a <= 0.001) return;
+  ctx.fillStyle = rgba(c, a); ctx.fillRect(0,0,W,H);
+}
+
+function drawShadows(){
+  const alt = sunAltitude(world.t);
+  const str = clamp(alt, 0, 1);
+  if (str <= 0.02) return;                 // 밤엔 그림자 거의 없음
+  const az = world.t * TAU;
+  const len = SHADOW_BASE_LEN * (1.3 - str*0.8);
+  const ox = Math.cos(az)*len, oy = Math.sin(az)*len + 8;
+  for (const p of clouds){
+    const a = p.opacity * SHADOW_MAX_ALPHA * str;
+    if (a <= 0.004) continue;
+    const s = p.r*2.3;
+    ctx.globalAlpha = a;
+    ctx.drawImage(spriteShadow, p.x+ox - s/2, p.y+oy - s/2, s, s);
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawRain(){
+  if (!rain.length) return;
+  ctx.strokeStyle = 'rgba(170,200,255,0.5)'; ctx.lineWidth = 1.4;
+  ctx.beginPath();
+  for (const d of rain){ ctx.moveTo(d.x, d.y); ctx.lineTo(d.x-1, d.y+8); }
+  ctx.stroke();
+}
+
+function drawClouds(){
+  const daylight = 0.45 + 0.55*clamp(sunAltitude(world.t)+0.25, 0, 1);
+  // 1) 밑면 음영 — 빽빽이 겹친 곳일수록 짙게, 아래로 오프셋 → 뭉게구름 볼륨감
+  //    (전체 음영을 먼저 깔아 본체 뒤에 두면 덩어리째 입체적으로 보인다)
+  for (const p of clouds){
+    const shade = clamp((p.localDensity - 4) / 16, 0, 1);
+    if (shade <= 0.01) continue;
+    const s = p.r*2.6;
+    ctx.globalAlpha = p.opacity * shade * 0.24 * daylight;
+    ctx.drawImage(spriteDark, p.x - s/2, p.y - s/2 + p.r*0.55, s, s);
+  }
+  // 2) 흰 본체 → 먹구름 오버레이 → 햇빛 받는 윗면 하이라이트
+  for (const p of clouds){
+    const s = p.r*2.4;
+    ctx.globalAlpha = p.opacity * (1 - 0.82*p.moisture) * daylight;
+    ctx.drawImage(spriteLight, p.x - s/2, p.y - s/2, s, s);
+    if (p.moisture > 0.02){
+      ctx.globalAlpha = p.opacity * p.moisture * (0.5 + 0.5*daylight);
+      ctx.drawImage(spriteDark, p.x - s/2, p.y - s/2, s, s);
+    }
+    const hi = clamp((p.localDensity - 6) / 18, 0, 1) * (1 - p.moisture);
+    if (hi > 0.02){
+      ctx.globalAlpha = p.opacity * hi * 0.5 * daylight;
+      const hs = p.r*1.5;
+      ctx.drawImage(spriteLight, p.x - hs/2, p.y - hs/2 - p.r*0.5, hs, hs);
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawBrush(){
+  if (!pointer.inside || pointer.x < 0) return;
+  ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.arc(pointer.x, pointer.y, PUFF_BASE_RADIUS*0.6, 0, TAU); ctx.stroke();
+}
+
+/* ══════════════ ⑫ 메인 루프 ══════════════ */
+let last = performance.now(), acc = 0, fpsAccum = 0, fpsFrames = 0;
+const STEP = 1/60;
+const elFps = document.getElementById('fps');
+function frame(now){
+  let dt = (now - last)/1000; last = now;
+  if (dt > 0.1) dt = 0.1;                 // 탭 비활성 등 큰 점프 방지
+  acc += dt;
+  const nowSec = now/1000;
+  let guard = 0;
+  while (acc >= STEP && guard++ < 6){ update(STEP, nowSec); acc -= STEP; }
+  render();
+
+  if (SHOW_FPS){
+    fpsAccum += dt; fpsFrames++;
+    if (fpsAccum >= 0.5){ elFps.textContent = `${(fpsFrames/fpsAccum).toFixed(0)} fps · ☁${clouds.length} · 💧${rain.length}`; fpsAccum=0; fpsFrames=0; }
+  }
+  requestAnimationFrame(frame);
+}
+
+/* ══════════════ ⑬ 초기화 + 리사이즈 ══════════════ */
+function resize(){
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.floor(W*DPR); canvas.height = Math.floor(H*DPR);
+  canvas.style.width = W+'px'; canvas.style.height = H+'px';
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  buildTerrain();
+}
+function hideHint(){ const h=document.getElementById('hint'); h.classList.add('gone'); }
+window.addEventListener('resize', resize);
+
+buildSprites();
+resize();
+requestAnimationFrame(frame);
+setTimeout(hideHint, 9000);
+
+/* ══════════════════════════════════════════════════════════════════════════
+   디버그 / 검증 훅  (콘솔에서 window.__nimbus 로 사용)
+   ── Test Case 1 (FIFO): 상단 상수 MAX_CLOUD_PARTICLES 를 100 으로 바꾼 뒤
+        __nimbus.spawnTest(150)  → 가장 먼저 생긴 ~50개가 opacity→0 으로 소멸하는지.
+   ── Test Case 2 (오로그래픽): __nimbus.forceWind(270, 80) 로 위쪽(산맥)으로 바람을 주고
+        화면 중상단에 구름을 그리면 → 정체 → 먹구름 → 비 파티클 → 지면이 젖는지.
+   ── Test Case 3 (차등 건조): 비가 그친 뒤 모래 분지(밝은 갈색)는 수초 내 원색 복귀,
+        마을 양동이 물은 ~45초(BUCKET_EVAP_REAL_SEC)에 걸쳐 천천히 줄어드는지.
+   ══════════════════════════════════════════════════════════════════════════ */
+window.__nimbus = {
+  spawnTest(n=150){ for (let i=0;i<n;i++) spawnPuff(W*0.2 + (i/n)*W*0.6, H*0.5 + Math.sin(i*0.3)*40); },
+  // 한곳에 빽빽이 쌓기 — 밀도 강우(산맥 없이 스스로 비) 검증용
+  pile(n=70, fx=0.5, fy=0.55){ for (let i=0;i<n;i++) spawnPuff(W*fx+(Math.random()-0.5)*55, H*fy+(Math.random()-0.5)*40); },
+  forceWind(deg=270, pct=80){ world.manualWind=true; world.lastWindInput=performance.now()/1000;
+    elWindDir.value=deg; elWindStr.value=pct; },
+  setTime(t01){ world.manualTime=true; world.lastTimeInput=performance.now()/1000; elTime.value=t01*100; },
+  // 동기 스텝퍼: rAF 없이 시뮬레이션을 n프레임(기본 10초분) 진행 — 헤드리스 검증용
+  step(n=600){ const ns=performance.now()/1000; for(let i=0;i<n;i++) update(STEP, ns); },
+  toggleFps(){ SHOW_FPS=!SHOW_FPS; elFps.style.display = SHOW_FPS?'block':'none'; },
+  get state(){ return { clouds: clouds.length, rain: rain.length, bucket: bucket.level.toFixed(2), growth: crops.growth.toFixed(2), t: world.t.toFixed(2) }; },
+};
+</script>
+</body>
+</html>
